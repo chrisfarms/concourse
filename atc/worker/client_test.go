@@ -389,6 +389,8 @@ var _ = Describe("Client", func() {
 			status       int
 			volumeMounts []worker.VolumeMount
 			inputSources []worker.InputSource
+			taskResult worker.TaskResult
+			failure 	error
 			err          error
 
 			fakeWorker           *workerfakes.FakeWorker
@@ -488,7 +490,7 @@ var _ = Describe("Client", func() {
 		})
 
 		JustBeforeEach(func() {
-			taskResult := client.RunTaskStep(
+			taskResult, err = client.RunTaskStep(
 				ctx,
 				logger,
 				fakeContainerOwner,
@@ -503,7 +505,7 @@ var _ = Describe("Client", func() {
 			)
 			status = taskResult.Status
 			volumeMounts = taskResult.VolumeMounts
-			err = taskResult.Err
+			failure = taskResult.Failure
 		})
 
 		Context("choosing a worker", func() {
@@ -565,8 +567,8 @@ var _ = Describe("Client", func() {
 				})
 			})
 
-			Context("when finding or choosing the worker fails", func() {
-				workerDisaster := errors.New("worker selection failed")
+			Context("when finding or choosing the worker errors", func() {
+				workerDisaster := errors.New("worker selection errored")
 
 				BeforeEach(func() {
 					fakePool.FindOrChooseWorkerForContainerReturns(nil, workerDisaster)
@@ -592,7 +594,6 @@ var _ = Describe("Client", func() {
 				Type:             db.ContainerTypeTask,
 				StepName:         "some-step",
 			}))
-
 		})
 
 		Context("found a container that has already exited", func() {
@@ -607,6 +608,7 @@ var _ = Describe("Client", func() {
 			It("returns result of container process", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(status).To(Equal(8))
+				Expect(failure).To(HaveOccurred())
 			})
 
 			Context("when 'limit-active-tasks' strategy is chosen", func() {
@@ -1168,6 +1170,8 @@ var _ = Describe("Client", func() {
 			versionResult runtime.VersionResult
 			status        int
 			err           error
+			failure error
+			result worker.PutResult
 
 			disasterErr error
 		)
@@ -1207,7 +1211,7 @@ var _ = Describe("Client", func() {
 		})
 
 		JustBeforeEach(func() {
-			result := client.RunPutStep(
+			result, err = client.RunPutStep(
 				ctx,
 				logger,
 				owner,
@@ -1221,8 +1225,8 @@ var _ = Describe("Client", func() {
 				fakeResource,
 			)
 			versionResult = result.VersionResult
-			err = result.Err
 			status = result.Status
+			failure = result.Failure
 		})
 
 		It("finds/chooses a worker", func() {
@@ -1321,6 +1325,7 @@ var _ = Describe("Client", func() {
 					It("returns a PutResult with the exit status from ErrResourceScriptFailed", func() {
 						Expect(status).To(Equal(10))
 						Expect(err).To(Equal(scriptFailErr))
+						Expect(failure).To(Equal(scriptFailErr))
 					})
 				})
 

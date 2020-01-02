@@ -132,6 +132,7 @@ func (s *fetchSource) Find() (GetResult, Volume, bool, error) {
 				Metadata: atcMetaData,
 			},
 			runtime.GetArtifact{VolumeHandle: volume.Handle()},
+			nil,
 		},
 		volume, true, nil
 }

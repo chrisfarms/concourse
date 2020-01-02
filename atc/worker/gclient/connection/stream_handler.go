@@ -64,6 +64,7 @@ func (sh *streamHandler) wait(decoder *json.Decoder) <-chan waitReturn {
 				break
 			}
 
+			// TODO what is the difference between payload.Error not being nil vs. payload.ExitStatus not being nil ?
 			if payload.Error != nil {
 				sh.wg.Wait()
 				result <- waitReturn{

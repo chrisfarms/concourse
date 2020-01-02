@@ -208,7 +208,7 @@ func (step *TaskStep) Run(ctx context.Context, state RunState) error {
 
 	owner := db.NewBuildStepContainerOwner(step.metadata.BuildID, step.planID, step.metadata.TeamID)
 
-	result := step.workerClient.RunTaskStep(
+	result, err := step.workerClient.RunTaskStep(
 		ctx,
 		logger,
 		owner,
@@ -222,15 +222,15 @@ func (step *TaskStep) Run(ctx context.Context, state RunState) error {
 		step.lockFactory,
 	)
 
-	err = result.Err
 	if err != nil {
 		if err == context.Canceled || err == context.DeadlineExceeded {
+			// Register artifacts so they may be referenced by the `on_abort` hook
 			step.registerOutputs(logger, repository, config, result.VolumeMounts, step.containerMetadata)
 		}
 		return err
 	}
 
-	step.succeeded = (result.Status == 0)
+	step.succeeded = (result.Status == 0 && result.Failure == nil)
 	step.delegate.Finished(logger, ExitStatus(result.Status))
 
 	step.registerOutputs(logger, repository, config, result.VolumeMounts, step.containerMetadata)
