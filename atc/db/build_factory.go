@@ -122,6 +122,31 @@ func (f *buildFactory) GetAllStartedBuilds() ([]Build, error) {
 	return getBuilds(query, f.conn, f.lockFactory)
 }
 
+func createBuild(tx Tx, build *build, vals map[string]interface{}) error {
+	var buildID int
+	err := psql.Insert("builds").
+		SetMap(vals).
+		Suffix("RETURNING id").
+		RunWith(tx).
+		QueryRow().
+		Scan(&buildID)
+	if err != nil {
+		return err
+	}
+
+	err = scanBuild(build, buildsQuery.
+		Where(sq.Eq{"b.id": buildID}).
+		RunWith(tx).
+		QueryRow(),
+		build.conn.EncryptionStrategy(),
+	)
+	if err != nil {
+		return err
+	}
+
+	return createBuildEventSeq(tx, buildID)
+}
+
 func getBuilds(buildsQuery sq.SelectBuilder, conn Conn, lockFactory lock.LockFactory) ([]Build, error) {
 	rows, err := buildsQuery.RunWith(conn).Query()
 	if err != nil {

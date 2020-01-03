@@ -291,6 +291,11 @@ func (b *build) SetInterceptible(i bool) error {
 }
 
 func (b *build) Start(plan atc.Plan) (bool, error) {
+	job, err := b.job()
+	if err != nil {
+		return false, err
+	}
+
 	tx, err := b.conn.Begin()
 	if err != nil {
 		return false, err
@@ -342,7 +347,7 @@ func (b *build) Start(plan atc.Plan) (bool, error) {
 	}
 
 	if b.jobID != 0 {
-		err = updateNextBuildForJob(tx, b.jobID)
+		err = updateNextBuildForJob(tx, job)
 		if err != nil {
 			return false, err
 		}
@@ -362,6 +367,11 @@ func (b *build) Start(plan atc.Plan) (bool, error) {
 }
 
 func (b *build) Finish(status BuildStatus) error {
+	job, err := b.job()
+	if err != nil {
+		return err
+	}
+
 	tx, err := b.conn.Begin()
 	if err != nil {
 		return err
@@ -504,23 +514,23 @@ func (b *build) Finish(status BuildStatus) error {
 		}
 	}
 
-	if b.jobID != 0 {
+	if b.jobID != 0 && job != nil {
 		err = requestScheduleOnDownstreamJobs(tx, b.jobID)
 		if err != nil {
 			return err
 		}
 
-		err = updateTransitionBuildForJob(tx, status, b)
+		err = updateTransitionBuildForJob(tx, status, job, b)
 		if err != nil {
 			return err
 		}
 
-		err = updateLatestCompletedBuildForJob(tx, b.jobID)
+		err = updateLatestCompletedBuildForJob(tx, job)
 		if err != nil {
 			return err
 		}
 
-		err = updateNextBuildForJob(tx, b.jobID)
+		err = updateNextBuildForJob(tx, job)
 		if err != nil {
 			return err
 		}
@@ -1521,31 +1531,6 @@ func (b *build) saveEvent(tx Tx, event atc.Event) error {
 	return err
 }
 
-func createBuild(tx Tx, build *build, vals map[string]interface{}) error {
-	var buildID int
-	err := psql.Insert("builds").
-		SetMap(vals).
-		Suffix("RETURNING id").
-		RunWith(tx).
-		QueryRow().
-		Scan(&buildID)
-	if err != nil {
-		return err
-	}
-
-	err = scanBuild(build, buildsQuery.
-		Where(sq.Eq{"b.id": buildID}).
-		RunWith(tx).
-		QueryRow(),
-		build.conn.EncryptionStrategy(),
-	)
-	if err != nil {
-		return err
-	}
-
-	return createBuildEventSeq(tx, buildID)
-}
-
 func buildStartedChannel() string {
 	return atc.ComponentBuildTracker
 }
@@ -1558,29 +1543,41 @@ func buildAbortChannel(buildID int) string {
 	return fmt.Sprintf("build_abort_%d", buildID)
 }
 
-func updateNextBuildForJob(tx Tx, jobID int) error {
-	_, err := tx.Exec(`
-		UPDATE jobs AS j
-		SET next_build_id = (
-			SELECT min(b.id)
-			FROM builds b
-			INNER JOIN jobs j ON j.id = b.job_id
-			WHERE b.job_id = $1
-			AND b.status IN ('pending', 'started')
-			AND (b.rerun_of IS NULL OR b.rerun_of = j.latest_completed_build_id)
-		)
-		WHERE j.id = $1
-	`, jobID)
+func updateNextBuildForJob(tx Tx, job Job) error {
+	var nextBuildID sql.NullString
+	err := psql.Select("min(b.id)").
+		From("builds b").
+		JoinClause("INNER JOIN jobs j ON j.id = b.job_id").
+		Where(sq.Eq{"b.job_id": job.ID()}).
+		Where(sq.Expr(`b.status IN ('pending', 'started')`)).
+		Where(sq.Or{
+			sq.Eq{"b.rerun_of": nil},
+			sq.Expr("b.rerun_of = j.latest_completed_build_id"),
+		}).
+		RunWith(tx).
+		QueryRow().
+		Scan(&nextBuildID)
 	if err != nil {
 		return err
 	}
-	return nil
+
+	var id int
+	if nextBuildID.Valid {
+		id, err = strconv.Atoi(nextBuildID.String)
+		if err != nil {
+			return err
+		}
+
+		return job.UpdateNextBuildID(tx, id)
+	}
+
+	return job.UpdateNextBuildID(tx, nil)
 }
 
-func updateLatestCompletedBuildForJob(tx Tx, jobID int) error {
+func updateLatestCompletedBuildForJob(tx Tx, job Job) error {
 	var latestNonRerunId int
 	err := latestCompletedBuildQuery.
-		Where(sq.Eq{"job_id": jobID}).
+		Where(sq.Eq{"job_id": job.ID()}).
 		Where(sq.Eq{"rerun_of": nil}).
 		RunWith(tx).
 		QueryRow().
@@ -1591,7 +1588,7 @@ func updateLatestCompletedBuildForJob(tx Tx, jobID int) error {
 
 	var latestRerunId sql.NullString
 	err = latestCompletedBuildQuery.
-		Where(sq.Eq{"job_id": jobID}).
+		Where(sq.Eq{"job_id": job.ID()}).
 		Where(sq.Eq{"rerun_of": latestNonRerunId}).
 		RunWith(tx).
 		QueryRow().
@@ -1610,19 +1607,10 @@ func updateLatestCompletedBuildForJob(tx Tx, jobID int) error {
 		id = latestNonRerunId
 	}
 
-	_, err = tx.Exec(`
-		UPDATE jobs AS j
-		SET latest_completed_build_id = $1
-		WHERE j.id = $2
-	`, id, jobID)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return job.UpdateLatestCompletedBuildID(tx, id)
 }
 
-func updateTransitionBuildForJob(tx Tx, buildStatus BuildStatus, build *build) error {
+func updateTransitionBuildForJob(tx Tx, buildStatus BuildStatus, job Job, build *build) error {
 	var shouldUpdateTransition bool
 
 	var latestID int
@@ -1630,7 +1618,7 @@ func updateTransitionBuildForJob(tx Tx, buildStatus BuildStatus, build *build) e
 	err := psql.Select("b.id", "b.status").
 		From("builds b").
 		JoinClause("INNER JOIN jobs j ON j.latest_completed_build_id = b.id").
-		Where(sq.Eq{"j.id": build.jobID}).
+		Where(sq.Eq{"j.id": job.ID()}).
 		RunWith(tx).
 		QueryRow().
 		Scan(&latestID, &latestStatus)
@@ -1658,15 +1646,30 @@ func updateTransitionBuildForJob(tx Tx, buildStatus BuildStatus, build *build) e
 	}
 
 	if shouldUpdateTransition {
-		_, err := psql.Update("jobs").
-			Set("transition_build_id", build.id).
-			Where(sq.Eq{"id": build.jobID}).
-			RunWith(tx).
-			Exec()
-		if err != nil {
-			return err
-		}
+		return job.UpdateTransitionBuildID(tx, build.id)
 	}
 
 	return nil
+}
+
+func (b *build) job() (Job, error) {
+	pipeline, found, err := b.Pipeline()
+	if err != nil {
+		return nil, err
+	}
+
+	if !found {
+		return nil, nil
+	}
+
+	job, found, err := pipeline.Job(b.jobName)
+	if err != nil {
+		return nil, err
+	}
+
+	if !found {
+		return nil, nil
+	}
+
+	return job, nil
 }

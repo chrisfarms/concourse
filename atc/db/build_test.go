@@ -381,11 +381,11 @@ var _ = Describe("Build", func() {
 			var (
 				pdBuild, pdBuild2, rrBuild db.Build
 				err                        error
-				latestCompletedBuildCol    = "latest_completed_build_id"
-				nextBuildCol               = "next_build_id"
-				transitionBuildCol         = "transition_build_id"
 			)
 
+			JustBeforeEach(func() {
+				job.Reload()
+			})
 			Context("when there is a pending build that is not a rerun", func() {
 				BeforeEach(func() {
 					pdBuild, err = job.CreateBuild()
@@ -405,15 +405,15 @@ var _ = Describe("Build", func() {
 						})
 
 						It("updates job latest finished build id", func() {
-							Expect(getJobBuildID(latestCompletedBuildCol, job.ID())).To(Equal(rrBuild.ID()))
+							Expect(job.LatestCompletedBuildID()).To(Equal(rrBuild.ID()))
 						})
 
 						It("updates job next build id to the pending build", func() {
-							Expect(getJobBuildID(nextBuildCol, job.ID())).To(Equal(pdBuild.ID()))
+							Expect(job.NextBuildID()).To(Equal(pdBuild.ID()))
 						})
 
 						It("updates transition build id to the rerun build", func() {
-							Expect(getJobBuildID(transitionBuildCol, job.ID())).To(Equal(rrBuild.ID()))
+							Expect(job.TransitionBuildID()).To(Equal(rrBuild.ID()))
 						})
 					})
 
@@ -427,11 +427,11 @@ var _ = Describe("Build", func() {
 						})
 
 						It("updates job next build id to be the next non rerun pending build", func() {
-							Expect(getJobBuildID(nextBuildCol, job.ID())).To(Equal(pdBuild2.ID()))
+							Expect(job.NextBuildID()).To(Equal(pdBuild2.ID()))
 						})
 
 						It("updates job latest finished build id", func() {
-							Expect(getJobBuildID(latestCompletedBuildCol, job.ID())).To(Equal(pdBuild.ID()))
+							Expect(job.LatestCompletedBuildID()).To(Equal(pdBuild.ID()))
 						})
 					})
 				})
@@ -446,11 +446,11 @@ var _ = Describe("Build", func() {
 					})
 
 					It("updates job next build id to the rerun build", func() {
-						Expect(getJobBuildID(nextBuildCol, job.ID())).To(Equal(rrBuild.ID()))
+						Expect(job.NextBuildID()).To(Equal(rrBuild.ID()))
 					})
 
 					It("updates job latest finished build id", func() {
-						Expect(getJobBuildID(latestCompletedBuildCol, job.ID())).To(Equal(pdBuild.ID()))
+						Expect(job.LatestCompletedBuildID()).To(Equal(pdBuild.ID()))
 					})
 				})
 
@@ -473,11 +473,11 @@ var _ = Describe("Build", func() {
 					})
 
 					It("does not updates job latest finished build id", func() {
-						Expect(getJobBuildID(latestCompletedBuildCol, job.ID())).To(Equal(pdBuild.ID()))
+						Expect(job.LatestCompletedBuildID()).To(Equal(pdBuild.ID()))
 					})
 
 					It("does not updates transition build id", func() {
-						Expect(getJobBuildID(transitionBuildCol, job.ID())).To(Equal(pdBuild.ID()))
+						Expect(job.TransitionBuildID()).To(Equal(pdBuild.ID()))
 					})
 				})
 			})
@@ -2338,18 +2338,4 @@ func convertToMD5(version atc.Version) string {
 	hasher := md5.New()
 	hasher.Write([]byte(versionJSON))
 	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-func getJobBuildID(col string, jobID int) int {
-	var result int
-
-	err := psql.Select(col).
-		From("jobs").
-		Where(sq.Eq{"id": jobID}).
-		RunWith(dbConn).
-		QueryRow().
-		Scan(&result)
-	Expect(err).ToNot(HaveOccurred())
-
-	return result
 }

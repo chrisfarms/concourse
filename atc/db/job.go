@@ -37,6 +37,9 @@ type Job interface {
 	Tags() []string
 	Public() bool
 	ScheduleRequestedTime() time.Time
+	NextBuildID() int
+	LatestCompletedBuildID() int
+	TransitionBuildID() int
 
 	Reload() (bool, error)
 
@@ -55,6 +58,9 @@ type Job interface {
 	Build(name string) (Build, bool, error)
 	FinishedAndNextBuild() (Build, Build, error)
 	UpdateFirstLoggedBuildID(newFirstLoggedBuildID int) error
+	UpdateNextBuildID(Tx, interface{}) error
+	UpdateLatestCompletedBuildID(Tx, int) error
+	UpdateTransitionBuildID(Tx, int) error
 	EnsurePendingBuildExists() error
 	GetPendingBuilds() ([]Build, error)
 
@@ -70,7 +76,7 @@ type Job interface {
 	HasNewInputs() bool
 }
 
-var jobsQuery = psql.Select("j.id", "j.name", "j.config", "j.paused", "j.first_logged_build_id", "j.pipeline_id", "p.name", "p.team_id", "t.name", "j.nonce", "j.tags", "j.has_new_inputs", "j.schedule_requested").
+var jobsQuery = psql.Select("j.id", "j.name", "j.config", "j.paused", "j.first_logged_build_id", "j.next_build_id", "j.latest_completed_build_id", "j.transition_build_id", "j.pipeline_id", "p.name", "p.team_id", "t.name", "j.nonce", "j.tags", "j.has_new_inputs", "j.schedule_requested").
 	From("jobs j, pipelines p").
 	LeftJoin("teams t ON p.team_id = t.id").
 	Where(sq.Expr("j.pipeline_id = p.id"))
@@ -88,16 +94,19 @@ func (e FirstLoggedBuildIDDecreasedError) Error() string {
 type job struct {
 	pipelineRef
 
-	id                    int
-	name                  string
-	paused                bool
-	firstLoggedBuildID    int
-	teamID                int
-	teamName              string
-	config                atc.JobConfig
-	tags                  []string
-	hasNewInputs          bool
-	scheduleRequestedTime time.Time
+	id                     int
+	name                   string
+	paused                 bool
+	firstLoggedBuildID     int
+	nextBuildID            int
+	latestCompletedBuildID int
+	transitionBuildID      int
+	teamID                 int
+	teamName               string
+	config                 atc.JobConfig
+	tags                   []string
+	hasNewInputs           bool
+	scheduleRequestedTime  time.Time
 }
 
 func newEmptyJob(conn Conn, lockFactory lock.LockFactory) *job {
@@ -142,6 +151,9 @@ func (j *job) ID() int                          { return j.id }
 func (j *job) Name() string                     { return j.name }
 func (j *job) Paused() bool                     { return j.paused }
 func (j *job) FirstLoggedBuildID() int          { return j.firstLoggedBuildID }
+func (j *job) NextBuildID() int                 { return j.nextBuildID }
+func (j *job) LatestCompletedBuildID() int      { return j.latestCompletedBuildID }
+func (j *job) TransitionBuildID() int           { return j.transitionBuildID }
 func (j *job) TeamID() int                      { return j.teamID }
 func (j *job) TeamName() string                 { return j.teamName }
 func (j *job) Config() atc.JobConfig            { return j.config }
@@ -238,6 +250,42 @@ func (j *job) UpdateFirstLoggedBuildID(newFirstLoggedBuildID int) error {
 	}
 
 	return nil
+}
+
+func (j *job) UpdateNextBuildID(tx Tx, buildID interface{}) error {
+	_, err := psql.Update("jobs").
+		Set("next_build_id", buildID).
+		Where(sq.Eq{
+			"id": j.id,
+		}).
+		RunWith(tx).
+		Exec()
+
+	return err
+}
+
+func (j *job) UpdateLatestCompletedBuildID(tx Tx, buildID int) error {
+	_, err := psql.Update("jobs").
+		Set("latest_completed_build_id", buildID).
+		Where(sq.Eq{
+			"id": j.id,
+		}).
+		RunWith(tx).
+		Exec()
+
+	return err
+}
+
+func (j *job) UpdateTransitionBuildID(tx Tx, buildID int) error {
+	_, err := psql.Update("jobs").
+		Set("transition_build_id", buildID).
+		Where(sq.Eq{
+			"id": j.id,
+		}).
+		RunWith(tx).
+		Exec()
+
+	return err
 }
 
 func (j *job) BuildsWithTime(page Page) ([]Build, Pagination, error) {
@@ -535,7 +583,7 @@ func (j *job) CreateBuild() (Build, error) {
 		return nil, err
 	}
 
-	err = updateNextBuildForJob(tx, j.id)
+	err = updateNextBuildForJob(tx, j)
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +633,7 @@ func (j *job) RerunBuild(buildToRerun Build) (Build, error) {
 		return nil, err
 	}
 
-	err = updateNextBuildForJob(tx, j.id)
+	err = updateNextBuildForJob(tx, j)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,16 +1103,21 @@ func (j *job) getNextBuildInputs(tx Tx) ([]BuildInput, error) {
 
 func scanJob(j *job, row scannable) error {
 	var (
-		configBlob []byte
-		nonce      sql.NullString
+		nextBuildID, latestCompletedBuildID, transitionBuildID sql.NullInt64
+		configBlob                                             []byte
+		nonce                                                  sql.NullString
 	)
 
-	err := row.Scan(&j.id, &j.name, &configBlob, &j.paused, &j.firstLoggedBuildID, &j.pipelineID, &j.pipelineName, &j.teamID, &j.teamName, &nonce, pq.Array(&j.tags), &j.hasNewInputs, &j.scheduleRequestedTime)
+	err := row.Scan(&j.id, &j.name, &configBlob, &j.paused, &j.firstLoggedBuildID, &nextBuildID, &latestCompletedBuildID, &transitionBuildID, &j.pipelineID, &j.pipelineName, &j.teamID, &j.teamName, &nonce, pq.Array(&j.tags), &j.hasNewInputs, &j.scheduleRequestedTime)
 	if err != nil {
 		return err
 	}
 
 	es := j.conn.EncryptionStrategy()
+
+	j.nextBuildID = int(nextBuildID.Int64)
+	j.latestCompletedBuildID = int(latestCompletedBuildID.Int64)
+	j.transitionBuildID = int(transitionBuildID.Int64)
 
 	var noncense *string
 	if nonce.Valid {
